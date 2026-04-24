@@ -1,0 +1,8 @@
+numpy>=1.23
+gymnasium>=0.29
+stable-baselines3>=2.3.0
+torch>=2.1
+tensorboard>=2.15
+matplotlib>=3.7
+pandas>=2.0
+tqdm>=4.65
