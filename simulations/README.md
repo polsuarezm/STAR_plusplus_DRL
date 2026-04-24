@@ -1,0 +1,1 @@
+# simulations\n\nStore STAR-CCM+ simulation files here. These files are usually generated and should be ignored by version control.\n
