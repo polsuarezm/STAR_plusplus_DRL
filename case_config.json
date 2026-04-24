@@ -1,0 +1,64 @@
+{
+  "geometry": {
+    "diameter": 1.0,
+    "span": 1.0,
+    "domain": {
+      "x_min": -5.0,
+      "x_max": 10.0,
+      "y_min": -5.0,
+      "y_max": 5.0
+    }
+  },
+  "flow": {
+    "reynolds": 100.0,
+    "density": 1.0,
+    "inlet_velocity": 1.0
+  },
+  "mesh": {
+    "base_reference": 1.0,
+    "base_size_factor": 20.0,
+    "target_surface_factor": 10.0,
+    "min_surface_factor": 1.0,
+    "cylinder_target_factor": 10.0,
+    "cylinder_min_factor": 1.0,
+    "jet_target_factor": 1.0,
+    "jet_min_factor": 0.5,
+    "wake_cell_factor": 10.0,
+    "prism_layers": 5,
+    "prism_stretching": 1.1,
+    "prism_total_thickness_factor": 10.0
+  },
+  "jets": {
+    "mode": "realtime",
+
+    "amplitude": 0.1,
+    "frequency": 10.0,
+
+    "table_path": "F:/STARCCM-UMICH/Nueva Carpeta/project-cylAFC/jet_actions.txt",
+    "delta_t_action": 0.05,
+    "n_actions": 200,
+
+    "realtime": {
+      "action_file":       "F:/STARCCM-UMICH/Nueva Carpeta/project-cylAFC/jet_action.txt",
+      "ready_flag":        "F:/STARCCM-UMICH/Nueva Carpeta/project-cylAFC/RT/agent_ready.flag",
+      "obs_flag":          "F:/STARCCM-UMICH/Nueva Carpeta/project-cylAFC/RT/starccm_ready.flag",
+      "obs_file":          "F:/STARCCM-UMICH/Nueva Carpeta/project-cylAFC/observations_list.txt",
+      "drag_file":         "F:/STARCCM-UMICH/Nueva Carpeta/project-cylAFC/RT/forces.txt",
+      "n_probes":          11,
+      "reward_alpha":      0.1,
+      "poll_interval_ms":  50,
+      "poll_timeout_s":    120
+    }
+  },
+  "probes": {
+    "points_file": "F:/STARCCM-UMICH/Nueva Carpeta/project-cylAFC/probe_positions.txt",
+    "region": "fluid"
+  },
+  "time": {
+    "dt": 0.01,
+    "steps": 500
+  },
+  "output": {
+    "save_sim": "output/cylinder_afc_Re100.sim"
+  }
+}

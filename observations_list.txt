@@ -1,0 +1,27 @@
+# probe_positions.txt
+# XYZ positions of history point probes in the fluid domain
+# Format: x  y  z  name
+# Cylinder center at (0,0,0.5), D=1, span=1
+# Probes distributed in wake and around cylinder surface vicinity
+
+# Near wake — on centerline
+1.0   0.0   0.5   wake_x1_y0
+2.0   0.0   0.5   wake_x2_y0
+3.0   0.0   0.5   wake_x3_y0
+
+# Near wake — off centerline
+1.0   0.5   0.5   wake_x1_yp
+1.0  -0.5   0.5   wake_x1_yn
+2.0   0.5   0.5   wake_x2_yp
+2.0  -0.5   0.5   wake_x2_yn
+
+# Just upstream
+-0.75  0.0   0.5   upstream
+
+# Cylinder shoulder vicinity (just outside boundary layer)
+0.0   0.75  0.5   shoulder_top
+0.0  -0.75  0.5   shoulder_bot
+
+# Far wake
+4.0   0.0   0.5   far_wake
+EOF
