@@ -1,6 +1,7 @@
 package macro;
 
 import java.io.*;
+import java.lang.reflect.*;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -22,10 +23,10 @@ import star.flow.*;
  * public listener API in STAR-CCM+ 2602), the macro takes full control
  * of the run loop itself:
  *
- *   for each timestep:
+ *   for each agent step (= action_repeat physical timesteps):
  *     1. wait for agent to write action  (polls ready_flag)
  *     2. read action, apply BC
- *     3. advance exactly ONE timestep    (MaxInnerIterations = N, MaxSteps += 1)
+ *     3. advance action_repeat timesteps (MaxPhysicalTime += action_repeat * dt)
  *     4. write obs_flag so agent can read observations
  *     5. repeat
  *
@@ -42,9 +43,20 @@ public class add_realtime_jets_from_json extends StarMacro {
         Simulation sim = getActiveSimulation();
 
         /* 1. read JSON ---------------------------------------------------- */
+        File repoRoot = null;
+        String sessionPath = sim.getSessionPath();
+        if (sessionPath != null && !sessionPath.trim().isEmpty()) {
+            File simDir = new File(sessionPath).getParentFile();
+            repoRoot = (simDir != null) ? simDir.getParentFile() : null;
+        }
+
         String cfgPath = System.getenv("STARCCM_JSON");
-        if (cfgPath == null || cfgPath.trim().isEmpty())
-            cfgPath = "F:/STARCCM-UMICH/Nueva Carpeta/project-cylAFC/case_config.JSON";
+        if (cfgPath == null || cfgPath.trim().isEmpty()) {
+            if (repoRoot != null)
+                cfgPath = new File(repoRoot, "config/case_config.json").getAbsolutePath();
+            if (cfgPath == null || cfgPath.trim().isEmpty())
+                cfgPath = "config/case_config.json";
+        }
 
         JsonObject cfg = Json.parseFile(cfgPath);
         String mode = cfg.getString("jets.mode", "prescribed").toLowerCase();
@@ -59,9 +71,9 @@ public class add_realtime_jets_from_json extends StarMacro {
 
         /* 3. mode dispatch ------------------------------------------------ */
         if ("realtime".equals(mode)) {
-            runRealtime(sim, topJet, botJet, cfg);
+            runRealtime(sim, topJet, botJet, cfg, repoRoot);
         } else if ("table".equals(mode)) {
-            setupTable(sim, topJet, botJet, cfg);
+            setupTable(sim, topJet, botJet, cfg, repoRoot);
         } else {
             setupPrescribed(sim, topJet, botJet, cfg);
         }
@@ -88,9 +100,9 @@ public class add_realtime_jets_from_json extends StarMacro {
     /*  TABLE                                                     */
     /*------------------------------------------------------------*/
     private static void setupTable(Simulation sim,
-            Boundary topJet, Boundary botJet, JsonObject cfg) {
+            Boundary topJet, Boundary botJet, JsonObject cfg, File repoRoot) {
 
-        String path = cfg.getString("jets.table_path", "");
+        String path = resolvePath(cfg.getString("jets.table_path", ""), repoRoot);
         if (path.isEmpty()) throw new RuntimeException("jets.table_path must be set for table mode.");
         double dt = cfg.getDouble("jets.delta_t_action", 0.0);
         if (dt <= 0) throw new RuntimeException("jets.delta_t_action must be > 0 for table mode.");
@@ -105,32 +117,48 @@ public class add_realtime_jets_from_json extends StarMacro {
     /*  REALTIME — macro-controlled run loop                      */
     /*------------------------------------------------------------*/
     private static void runRealtime(Simulation sim,
-            Boundary topJet, Boundary botJet, JsonObject cfg) {
+            Boundary topJet, Boundary botJet, JsonObject cfg, File repoRoot) {
 
-        String actionFile = cfg.getString("jets.realtime.action_file", "jet_action.txt");
-        String readyFlag  = cfg.getString("jets.realtime.ready_flag",  "agent_ready.flag");
-        String obsFlag    = cfg.getString("jets.realtime.obs_flag",    "starccm_ready.flag");
-        long   pollMs     = (long) cfg.getDouble("jets.realtime.poll_interval_ms", 50.0);
-        long   timeoutMs  = (long)(cfg.getDouble("jets.realtime.poll_timeout_s",   60.0) * 1000.0);
-        int    nSteps     = cfg.getInt("time.steps", 100);
+        String actionFile = resolvePath(cfg.getString("jets.realtime.action_file", "runtime/jet_action.txt"),       repoRoot);
+        String readyFlag  = resolvePath(cfg.getString("jets.realtime.ready_flag",  "runtime/agent_ready.flag"),     repoRoot);
+        String obsFlag    = resolvePath(cfg.getString("jets.realtime.obs_flag",    "runtime/starccm_ready.flag"),   repoRoot);
+        String obsFile    = resolvePath(cfg.getString("jets.realtime.obs_file",    "runtime/observations.txt"),     repoRoot);
+        String forcesFile = resolvePath(cfg.getString("jets.realtime.drag_file",   "runtime/forces.txt"),           repoRoot);
+        String pointsFile = resolvePath(cfg.getString("probes.points_file", "data/observations_list.txt"),          repoRoot);
+        long   pollMs      = (long) cfg.getDouble("jets.realtime.poll_interval_ms", 50.0);
+        long   timeoutMs   = (long)(cfg.getDouble("jets.realtime.poll_timeout_s",   60.0) * 1000.0);
+        int    nSteps      = cfg.getInt("jets.realtime.n_steps", 1000);
+        double dt          = cfg.getDouble("time.dt", 0.01);
+        int    actionRepeat = cfg.getInt("jets.realtime.action_repeat", 1);
+        int    agentSteps  = nSteps / actionRepeat;
+        double agentDt     = actionRepeat * dt;
 
-        log(sim, "Realtime loop: " + nSteps + " timesteps.");
+        disableAutosave(sim);
+
+        List<String> probeNames = loadProbeNames(sim, pointsFile);
+        log(sim, "Realtime loop: " + nSteps + " CFD timesteps, dt=" + dt + " s, "
+                + actionRepeat + " timesteps/action (" + agentDt + " s per action), "
+                + agentSteps + " agent steps, "
+                + (probeNames.size() * 2) + " obs values.");
         log(sim, "  action_file : " + actionFile);
         log(sim, "  ready_flag  : " + readyFlag);
         log(sim, "  obs_flag    : " + obsFlag);
+        log(sim, "  obs_file    : " + obsFile);
 
-        // Get the MaxSteps stopping criterion — we advance it by 1 each iteration.
-        StepStoppingCriterion maxSteps = getMaxStepsCriterion(sim);
-        int currentStepLimit = maxSteps.getMaximumNumberSteps();
+        PhysicalTimeStoppingCriterion timeCrit = getPhysicalTimeCriterion(sim);
 
         // Signal agent: ready for first action.
         touchFile(obsFlag, sim);
 
         double lastV = 0.0;
 
-        for (int step = 0; step < nSteps; step++) {
+        for (int step = 0; step < agentSteps; step++) {
 
-            log(sim, "--- Step " + (step + 1) + " / " + nSteps + " ---");
+            double tStart = sim.getSolution().getPhysicalTime();
+            double tEnd   = tStart + agentDt;
+            log(sim, String.format(java.util.Locale.US,
+                "--- Agent step %d / %d  (t=%.4g → %.4g s) ---",
+                step + 1, agentSteps, tStart, tEnd));
 
             // 1. Wait for agent to provide action
             log(sim, "Waiting for agent_ready.flag ...");
@@ -144,14 +172,14 @@ public class add_realtime_jets_from_json extends StarMacro {
             log(sim, String.format(java.util.Locale.US,
                 "Applied: top=%.6g  bot=%.6g", v, -v));
 
-            // 3. Advance exactly one timestep by incrementing the step limit by 1
-            currentStepLimit += 1;
-            maxSteps.setMaximumNumberSteps(currentStepLimit);
+            // 3. Advance exactly actionRepeat physical timesteps (unambiguous: no iteration confusion)
+            timeCrit.getMaximumTime().setValue(tEnd);
             sim.getSimulationIterator().run();
 
-            // 4. Signal agent: step done, observations available
+            // 4. Write observations from the last sub-step, then signal agent
+            writeObservations(sim, probeNames, obsFile, forcesFile);
             touchFile(obsFlag, sim);
-            log(sim, "Step done — obs_flag written.");
+            log(sim, "Agent step done — obs written, obs_flag touched.");
         }
 
         log(sim, "Realtime loop complete.");
@@ -160,6 +188,55 @@ public class add_realtime_jets_from_json extends StarMacro {
     /*------------------------------------------------------------*/
     /*  Helpers for realtime                                      */
     /*------------------------------------------------------------*/
+
+    /** Disable STAR-CCM+ autosave so it doesn't block the realtime loop. */
+    private static void disableAutosave(Simulation sim) {
+        // Try the AutoSave object accessible from the sim or its iterator
+        for (String getter : new String[]{
+                "getAutoSaveManager", "getAutosaveManager", "getAutoSave"}) {
+            try {
+                Object asm = sim.getClass().getMethod(getter).invoke(sim);
+                if (asm == null) continue;
+                boolean acted = false;
+                for (Method m : asm.getClass().getMethods()) {
+                    if (m.getParameterCount() != 1) continue;
+                    String n = m.getName();
+                    if (m.getParameterTypes()[0] == boolean.class &&
+                            (n.equals("setEnabled") || n.equals("setActive") || n.equals("setAutoSaveEnabled"))) {
+                        m.invoke(asm, Boolean.FALSE);
+                        log(sim, "Autosave disabled via " + getter + "()." + n + "(false).");
+                        acted = true;
+                    }
+                }
+                if (acted) return;
+            } catch (Exception ignored) {}
+        }
+        // Fallback: try sim.getSimulationIterator() path
+        try {
+            Object iter = sim.getClass().getMethod("getSimulationIterator").invoke(sim);
+            for (String getter : new String[]{"getAutoSave", "getAutoSaveManager"}) {
+                try {
+                    Object asm = iter.getClass().getMethod(getter).invoke(iter);
+                    if (asm == null) continue;
+                    for (Method m : asm.getClass().getMethods()) {
+                        if (m.getParameterCount() == 1 &&
+                                m.getParameterTypes()[0] == boolean.class &&
+                                m.getName().startsWith("set")) {
+                            String n = m.getName().toLowerCase();
+                            if (n.contains("enable") || n.contains("active")) {
+                                m.invoke(asm, Boolean.FALSE);
+                                log(sim, "Autosave disabled via iterator." + getter + "()." + m.getName() + "(false).");
+                                return;
+                            }
+                        }
+                    }
+                } catch (Exception ignored) {}
+            }
+        } catch (Exception ignored) {}
+        log(sim, "WARNING: could not disable autosave programmatically. " +
+                "Disable it manually: Tools → Options → Environment → Autosave.");
+    }
+
     private static double waitForAction(Simulation sim,
             String actionFile, String readyFlag,
             long pollMs, long timeoutMs, double lastV) {
@@ -194,9 +271,9 @@ public class add_realtime_jets_from_json extends StarMacro {
         return lastV;
     }
 
-    private static StepStoppingCriterion getMaxStepsCriterion(Simulation sim) {
-        return (StepStoppingCriterion) sim.getSolverStoppingCriterionManager()
-                .getSolverStoppingCriterion("Maximum Steps");
+    private static PhysicalTimeStoppingCriterion getPhysicalTimeCriterion(Simulation sim) {
+        return (PhysicalTimeStoppingCriterion) sim.getSolverStoppingCriterionManager()
+                .getSolverStoppingCriterion("Maximum Physical Time");
     }
 
     private static void setConstVel(Boundary b, double v) {
@@ -288,6 +365,93 @@ public class add_realtime_jets_from_json extends StarMacro {
         }
     }
 
+    /** Load probe names (4th column) from observations_list.txt. */
+    private static List<String> loadProbeNames(Simulation sim, String pointsFile) {
+        List<String> names = new ArrayList<String>();
+        int idx = 1;
+        try (BufferedReader br = new BufferedReader(new FileReader(pointsFile))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty() || line.startsWith("#") || line.startsWith("//")) continue;
+                String[] tok = line.split("\\s+");
+                if (tok.length < 3) continue;
+                names.add(tok.length >= 4 ? tok[3] : ("probe_" + idx));
+                idx++;
+            }
+        } catch (Exception ex) {
+            sim.println("[jets-rt] WARN: cannot load probe names: " + ex.getMessage());
+        }
+        log(sim, "Loaded " + names.size() + " probe names from " + pointsFile);
+        return names;
+    }
+
+    /**
+     * Read Vx and Vy from each probe's MaxReport and write space-separated
+     * values to obsFile and forcesFile.  Uses reflection to call getValue()
+     * so the code is robust across STAR-CCM+ API variations.
+     */
+    private static void writeObservations(Simulation sim, List<String> probeNames,
+            String obsFile, String forcesFile) {
+        StringBuilder sb = new StringBuilder();
+        for (String name : probeNames) {
+            for (String comp : new String[]{"Vx", "Vy"}) {
+                if (sb.length() > 0) sb.append(" ");
+                String repName = "Rep_" + name + "_" + comp;
+                double val = 0.0;
+                try {
+                    Object rep = sim.getReportManager().getReport(repName);
+                    val = evalReport(rep);
+                } catch (Exception ex) {
+                    sim.println("[jets-rt] WARN: cannot read " + repName + ": " + ex.getMessage());
+                }
+                sb.append(String.format(java.util.Locale.US, "%.10g", val));
+            }
+        }
+        String content = sb.toString();
+        writeTextFile(obsFile,    content, sim);
+        writeTextFile(forcesFile, content, sim);
+    }
+
+    /** Try several reflection-based approaches to get a scalar double from a Report object. */
+    private static double evalReport(Object rep) {
+        // 1. getReportMonitorValue() → last monitor-recorded value
+        try {
+            Method m = rep.getClass().getMethod("getReportMonitorValue");
+            Object rv = m.invoke(rep);
+            if (rv instanceof Number) return ((Number) rv).doubleValue();
+        } catch (Exception ignored) {}
+        // 2. getValue(Units=null) → evaluate on current field, base SI units
+        try {
+            for (Method m : rep.getClass().getMethods()) {
+                if (!m.getName().equals("getValue") || m.getParameterCount() != 1) continue;
+                try {
+                    Object rv = m.invoke(rep, (Object) null);
+                    if (rv instanceof Number) return ((Number) rv).doubleValue();
+                } catch (Exception ignored2) {}
+            }
+        } catch (Exception ignored) {}
+        // 3. getValue() no-arg
+        try {
+            Method m = rep.getClass().getMethod("getValue");
+            Object rv = m.invoke(rep);
+            if (rv instanceof Number) return ((Number) rv).doubleValue();
+        } catch (Exception ignored) {}
+        return Double.NaN;
+    }
+
+    private static void writeTextFile(String path, String content, Simulation sim) {
+        try {
+            File f = new File(path);
+            if (f.getParentFile() != null) f.getParentFile().mkdirs();
+            try (PrintWriter pw = new PrintWriter(new FileWriter(f, false))) {
+                pw.println(content);
+            }
+        } catch (IOException ex) {
+            sim.println("[jets-rt] WARN write " + path + ": " + ex.getMessage());
+        }
+    }
+
     private static void touchFile(String p, Simulation sim) {
         try {
             File f = new File(p);
@@ -299,6 +463,10 @@ public class add_realtime_jets_from_json extends StarMacro {
     }
 
     private static void deleteFile(String p) { new File(p).delete(); }
+    private static String resolvePath(String path, File repoRoot) {
+        if (path == null || path.isEmpty() || new File(path).isAbsolute() || repoRoot == null) return path;
+        return new File(repoRoot, path).getAbsolutePath();
+    }
     private static void log(Simulation s, String m) { s.println("[jets_macro] " + m); }
     private static String fmt(double v) { return String.format(java.util.Locale.US, "%.16g", v); }
 

@@ -1,6 +1,7 @@
 package macro;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
 import java.lang.reflect.Method;
@@ -20,15 +21,26 @@ import star.meshing.*;
 import star.prismmesher.*;
 import star.vis.*;
 
-public class cylinder_afc_from_json extends StarMacro {
+public class template_base_for_cylinderAFC extends StarMacro {
 
     @Override
     public void execute() {
         Simulation sim = getActiveSimulation();
 
+        // Derive repo root from the open .sim file (assumed to be in simulations/)
+        File repoRoot = null;
+        String sessionPath = sim.getSessionPath();
+        if (sessionPath != null && !sessionPath.trim().isEmpty()) {
+            File simDir = new File(sessionPath).getParentFile();
+            repoRoot = (simDir != null) ? simDir.getParentFile() : null;
+        }
+
         String configPath = System.getenv("STARCCM_JSON");
         if (configPath == null || configPath.trim().isEmpty()) {
-            configPath = "F:/STARCCM-UMICH/Nueva Carpeta/project-cylAFC/case_config.JSON";
+            if (repoRoot != null)
+                configPath = new File(repoRoot, "config/case_config.json").getAbsolutePath();
+            if (configPath == null || configPath.trim().isEmpty())
+                configPath = "config/case_config.json";
         }
 
         log(sim, "Reading config from: " + configPath);
@@ -67,7 +79,9 @@ public class cylinder_afc_from_json extends StarMacro {
 
         double dt = cfg.getDouble("time.dt", 0.01);
         int steps = cfg.getInt("time.steps", 5000);
-        String savePath = cfg.getString("output.save_sim", "output/cylinder_afc_out.sim");
+        String savePath = cfg.getString("output.save_sim", "simulations/cylinder_afc_Re100.sim");
+        if (!new File(savePath).isAbsolute() && repoRoot != null)
+            savePath = new File(repoRoot, savePath).getAbsolutePath();
 
         Units m = unit(sim, "m");
         Units nondim = unit(sim, "");

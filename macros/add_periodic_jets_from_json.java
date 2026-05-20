@@ -1,6 +1,7 @@
 package macro;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
 import java.lang.reflect.Method;
@@ -49,7 +50,15 @@ public class add_periodic_jets_from_json extends StarMacro {
         // ------------------------------------------------------------------ //
         String configPath = System.getenv("STARCCM_JSON");
         if (configPath == null || configPath.trim().isEmpty()) {
-            configPath = "F:/STARCCM-UMICH/Nueva Carpeta/project-cylAFC/case_config.JSON";
+            String sessionPath = sim.getSessionPath();
+            if (sessionPath != null && !sessionPath.trim().isEmpty()) {
+                File simDir   = new File(sessionPath).getParentFile();
+                File repoRoot = (simDir != null) ? simDir.getParentFile() : null;
+                if (repoRoot != null)
+                    configPath = new File(repoRoot, "config/case_config.json").getAbsolutePath();
+            }
+            if (configPath == null || configPath.trim().isEmpty())
+                configPath = "config/case_config.json";
         }
         log(sim, "Reading config from: " + configPath);
         JsonObject cfg = Json.parseFile(configPath);

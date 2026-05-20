@@ -1,12 +1,18 @@
 {
+  "starccm": {
+    "exe": "C:/Program Files/Siemens/YOUR_VERSION/STAR-CCM+/star/bin/starccm+.exe",
+    "licpath": "",
+    "podkey":  ""
+  },
+
   "geometry": {
     "diameter": 1.0,
-    "span": 1.0,
+    "span": 0.2,
     "domain": {
-      "x_min": -5.0,
-      "x_max": 10.0,
-      "y_min": -5.0,
-      "y_max": 5.0
+      "x_min": -4.0,
+      "x_max": 15.0,
+      "y_min": -3.0,
+      "y_max": 3.0
     }
   },
   "flow": {
@@ -15,7 +21,7 @@
     "inlet_velocity": 1.0
   },
   "mesh": {
-    "base_reference": 1.0,
+    "base_reference": 0.5,
     "base_size_factor": 20.0,
     "target_surface_factor": 10.0,
     "min_surface_factor": 1.0,
@@ -31,34 +37,36 @@
   "jets": {
     "mode": "realtime",
 
-    "amplitude": 0.1,
+    "amplitude": 1.0,
     "frequency": 10.0,
 
-    "table_path": "F:/STARCCM-UMICH/Nueva Carpeta/project-cylAFC/jet_actions.txt",
-    "delta_t_action": 0.05,
+    "table_path": "data/jet_actions_table.txt",
+    "delta_t_action": 1.0,
     "n_actions": 200,
 
     "realtime": {
-      "action_file":       "F:/STARCCM-UMICH/Nueva Carpeta/project-cylAFC/jet_action.txt",
-      "ready_flag":        "F:/STARCCM-UMICH/Nueva Carpeta/project-cylAFC/RT/agent_ready.flag",
-      "obs_flag":          "F:/STARCCM-UMICH/Nueva Carpeta/project-cylAFC/RT/starccm_ready.flag",
-      "obs_file":          "F:/STARCCM-UMICH/Nueva Carpeta/project-cylAFC/observations_list.txt",
-      "drag_file":         "F:/STARCCM-UMICH/Nueva Carpeta/project-cylAFC/RT/forces.txt",
-      "n_probes":          11,
+      "action_file":       "runtime/jet_action.txt",
+      "ready_flag":        "runtime/agent_ready.flag",
+      "obs_flag":          "runtime/starccm_ready.flag",
+      "obs_file":          "runtime/observations.txt",
+      "drag_file":         "runtime/forces.txt",
+      "n_probes":          22,
       "reward_alpha":      0.1,
-      "poll_interval_ms":  50,
+      "action_repeat":     3,
+      "n_steps":           1000,
+      "poll_interval_ms":  10,
       "poll_timeout_s":    120
     }
   },
   "probes": {
-    "points_file": "F:/STARCCM-UMICH/Nueva Carpeta/project-cylAFC/probe_positions.txt",
+    "points_file": "data/observations_list.txt",
     "region": "fluid"
   },
   "time": {
     "dt": 0.01,
-    "steps": 500
+    "steps": 10000
   },
   "output": {
-    "save_sim": "output/cylinder_afc_Re100.sim"
+    "save_sim": "simulations/cylinder_afc_Re100.sim"
   }
 }

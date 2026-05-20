@@ -2,36 +2,40 @@
 train_drl.py
 ============
 Trains a PPO agent on the StarCCMEnv using Stable-Baselines3.
- 
+
 Usage
 -----
-  python train_drl.py                         # train from scratch
-  python train_drl.py --resume models/ppo_afc # resume from checkpoint
-  python train_drl.py --eval  models/ppo_afc  # evaluate only
- 
+  # Manual mode (default): start STAR-CCM+ with the realtime macro yourself first
+  python python/train_drl.py
+  python python/train_drl.py --resume models/ppo_afc_cylinder
+  python python/train_drl.py --eval   models/ppo_afc_cylinder
+
+  # Auto-launch mode: Python spawns starccm+ each episode (HPC / batch)
+  python python/train_drl.py --auto-launch
+
 Dependencies
 ------------
   pip install stable-baselines3 gymnasium numpy torch
- 
-STAR-CCM+ must be accessible on PATH as "starccm+" (or set STARCCM_EXE).
-The sim file and macros must already exist at the paths in case_config.json.
 """
  
 import argparse
 import os
+import sys
 import json
 from pathlib import Path
- 
+
+# Ensure python/ directory is on the path when running from repo root
+sys.path.insert(0, str(Path(__file__).parent))
+
 import numpy as np
 from stable_baselines3 import PPO
-from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.callbacks import (
     CheckpointCallback,
-    EvalCallback,
     BaseCallback,
 )
 from stable_baselines3.common.monitor import Monitor
- 
+from gymnasium.wrappers import RescaleAction
+
 from starccm_env import StarCCMEnv
  
  
@@ -39,15 +43,25 @@ from starccm_env import StarCCMEnv
 #  Config                                                                      #
 # ─────────────────────────────────────────────────────────────────────────── #
  
-CONFIG_PATH   = "F:/STARCCM-UMICH/Nueva Carpeta/project-cylAFC/case_config.JSON"
-SIM_FILE      = "F:/STARCCM-UMICH/Nueva Carpeta/project-cylAFC/cylinder_afc_Re100.sim"
-MACRO_FILE    = "F:/STARCCM-UMICH/Nueva Carpeta/project-cylAFC/add_realtime_jets_from_json.java"
+CONFIG_PATH   = "config/case_config.json"
+SIM_FILE      = "simulations/cylinder_afc_Re100.sim"
+MACRO_FILE    = "macros/add_realtime_jets_from_json.java"
 MODELS_DIR    = "models"
 LOGS_DIR      = "logs"
 MODEL_NAME    = "ppo_afc_cylinder"
- 
-# STAR-CCM+ executable — override with env var STARCCM_EXE if needed
-STARCCM_EXE   = os.environ.get("STARCCM_EXE", "starccm+")
+
+def _load_starccm_cfg() -> dict:
+    """Read starccm block from case_config.json; env var STARCCM_EXE overrides exe."""
+    try:
+        with open(CONFIG_PATH) as f:
+            cfg = json.load(f)
+        sc = cfg.get("starccm", {})
+    except Exception:
+        sc = {}
+    sc["exe"] = os.environ.get("STARCCM_EXE", sc.get("exe", "starccm+"))
+    return sc
+
+STARCCM_CFG = _load_starccm_cfg()
  
 # PPO hyperparameters — tuned for AFC on a cylinder at Re=100
 PPO_KWARGS = dict(
@@ -61,12 +75,12 @@ PPO_KWARGS = dict(
     ent_coef         = 0.01,     # exploration bonus
     vf_coef          = 0.5,
     max_grad_norm    = 0.5,
-    policy_kwargs    = dict(net_arch=[64, 64]),
+    policy_kwargs    = dict(net_arch=[64, 64], log_std_init=-1.0),
     verbose          = 1,
     tensorboard_log  = LOGS_DIR,
 )
  
-TOTAL_TIMESTEPS = 50_000   # increase for longer training runs
+TOTAL_TIMESTEPS = 100   # increase for longer training runs
  
  
 # ─────────────────────────────────────────────────────────────────────────── #
@@ -74,19 +88,17 @@ TOTAL_TIMESTEPS = 50_000   # increase for longer training runs
 # ─────────────────────────────────────────────────────────────────────────── #
  
 def build_starccm_cmd(sim_file: str, macro_file: str) -> list:
-    """
-    Build the STAR-CCM+ batch command.
-    Adjust flags for your licence server / installation as needed.
-    """
-    return [
-        STARCCM_EXE,
-        "-batch",          # no GUI
-        "-macro", macro_file,
-        sim_file,
-        # Add licence flags here if needed, e.g.:
-        # "-licpath", "1999@licence-server",
-        # "-podkey",  "YOUR_POD_KEY",
-    ]
+    exe     = STARCCM_CFG.get("exe", "starccm+")
+    licpath = STARCCM_CFG.get("licpath", "")
+    podkey  = STARCCM_CFG.get("podkey",  "")
+
+    cmd = [exe, "-batch", "-macro", str(Path(macro_file).resolve()),
+           str(Path(sim_file).resolve())]
+    if licpath:
+        cmd += ["-licpath", licpath]
+    if podkey:
+        cmd += ["-podkey", podkey]
+    return cmd
  
  
 # ─────────────────────────────────────────────────────────────────────────── #
@@ -120,18 +132,20 @@ class EpisodeLogger(BaseCallback):
 # ─────────────────────────────────────────────────────────────────────────── #
  
 def make_env(config_path: str, sim_file: str, macro_file: str,
-             verbose: bool = False) -> StarCCMEnv:
+             auto_launch: bool = False, verbose: bool = False) -> StarCCMEnv:
     """
     Create and wrap a single StarCCMEnv.
-    Note: SB3's VecEnv parallelism is NOT used here because each env
-    needs its own STAR-CCM+ licence. Use n_envs=1.
+    auto_launch=False: STAR-CCM+ must be started manually before calling reset().
+    auto_launch=True:  Python spawns starccm+ subprocess each episode (HPC mode).
     """
-    cmd = build_starccm_cmd(sim_file, macro_file)
+    cmd = build_starccm_cmd(sim_file, macro_file) if auto_launch else None
     env = StarCCMEnv(
         config_path  = config_path,
         starccm_cmd  = cmd,
         verbose      = verbose,
     )
+    # Rescale to [-1, 1] so PPO's Gaussian (std≈1 at init) doesn't saturate at ±a_max
+    env = RescaleAction(env, min_action=-1.0, max_action=1.0)
     env = Monitor(env, filename=str(Path(LOGS_DIR) / MODEL_NAME))
     return env
  
@@ -140,11 +154,11 @@ def make_env(config_path: str, sim_file: str, macro_file: str,
 #  Train                                                                       #
 # ─────────────────────────────────────────────────────────────────────────── #
  
-def train(resume_path: str = None):
+def train(resume_path: str = None, auto_launch: bool = False):
     Path(MODELS_DIR).mkdir(exist_ok=True)
     Path(LOGS_DIR).mkdir(exist_ok=True)
- 
-    env = make_env(CONFIG_PATH, SIM_FILE, MACRO_FILE, verbose=True)
+
+    env = make_env(CONFIG_PATH, SIM_FILE, MACRO_FILE, auto_launch=auto_launch, verbose=True)
  
     if resume_path and Path(resume_path + ".zip").exists():
         print(f"[train] Resuming from {resume_path}")
@@ -186,8 +200,8 @@ def train(resume_path: str = None):
 #  Evaluate                                                                    #
 # ─────────────────────────────────────────────────────────────────────────── #
  
-def evaluate(model_path: str, n_episodes: int = 5):
-    env = make_env(CONFIG_PATH, SIM_FILE, MACRO_FILE, verbose=True)
+def evaluate(model_path: str, n_episodes: int = 5, auto_launch: bool = False):
+    env = make_env(CONFIG_PATH, SIM_FILE, MACRO_FILE, auto_launch=auto_launch, verbose=True)
     model = PPO.load(model_path, env=env)
  
     print(f"[eval] Evaluating {n_episodes} episodes...")
@@ -217,13 +231,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train/evaluate PPO on cylinder AFC.")
     parser.add_argument("--resume", type=str, default=None,
                         help="Path to existing model (without .zip) to resume training.")
-    parser.add_argument("--eval",   type=str, default=None,
+    parser.add_argument("--eval", type=str, default=None,
                         help="Path to model (without .zip) to evaluate only.")
     parser.add_argument("--episodes", type=int, default=5,
                         help="Number of evaluation episodes (used with --eval).")
+    parser.add_argument("--auto-launch", action="store_true",
+                        help="Auto-launch STAR-CCM+ each episode (default: manual).")
     args = parser.parse_args()
- 
+
     if args.eval:
-        evaluate(args.eval, n_episodes=args.episodes)
+        evaluate(args.eval, n_episodes=args.episodes, auto_launch=args.auto_launch)
     else:
-        train(resume_path=args.resume)
+        train(resume_path=args.resume, auto_launch=args.auto_launch)

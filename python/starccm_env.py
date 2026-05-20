@@ -72,32 +72,43 @@ class StarCCMEnv(gym.Env):
     def __init__(self, config_path: str, starccm_cmd: list = None, verbose: bool = False):
         super().__init__()
 
-        self.config_path  = Path(config_path)
+        self.config_path  = Path(config_path).resolve()
+        self._root        = self.config_path.parent.parent  # config/ → repo root
         self.starccm_cmd  = starccm_cmd
         self.verbose      = verbose
         self._process     = None   # STAR-CCM+ subprocess handle
+        self._starccm_log = None   # log file handle for STAR-CCM+ stdout
 
         # ── load config ────────────────────────────────────────────────── #
         with open(config_path) as f:
             self.cfg = json.load(f)
 
         rt = self.cfg["jets"]["realtime"]
-        self.action_file  = Path(rt["action_file"])
-        self.ready_flag   = Path(rt["ready_flag"])
-        self.obs_flag     = Path(rt["obs_flag"])
+
+        def _abs(p: str) -> Path:
+            q = Path(p)
+            return q if q.is_absolute() else self._root / q
+
+        self.action_file  = _abs(rt["action_file"])
+        self.ready_flag   = _abs(rt["ready_flag"])
+        self.obs_flag     = _abs(rt["obs_flag"])
         self.poll_s       = rt.get("poll_interval_ms", 50) / 1000.0
         self.timeout_s    = rt.get("poll_timeout_s", 60)
 
-        self.obs_file     = Path(rt["obs_file"])       # written by STAR-CCM+ probes
-        self.drag_file    = Path(rt.get("drag_file", rt["obs_file"]))  # Cd source
+        self.obs_file     = _abs(rt["obs_file"])
+        self.drag_file    = _abs(rt.get("drag_file", rt["obs_file"]))
+
+        # Ensure runtime dir exists so Python can write flag/action files
+        self.action_file.parent.mkdir(parents=True, exist_ok=True)
         self.n_probes     = int(rt["n_probes"])        # observation vector length
         self.reward_alpha = float(rt.get("reward_alpha", 0.0))  # lift penalty weight
+        self.action_repeat = int(rt.get("action_repeat", 1))
 
         amp = self.cfg["jets"]["amplitude"]
         self.a_max = float(amp)
 
-        n_steps = self.cfg["time"]["steps"]
-        self.max_episode_steps = int(n_steps)
+        n_steps = int(rt.get("n_steps", 1000))
+        self.max_episode_steps = n_steps // self.action_repeat
         self._step_count = 0
 
         # ── spaces ─────────────────────────────────────────────────────── #
@@ -121,30 +132,37 @@ class StarCCMEnv(gym.Env):
 
         # Clean up leftover flag files from previous episode
         for f in [self.action_file, self.ready_flag, self.obs_flag]:
-            try:
-                f.unlink()
-            except FileNotFoundError:
-                pass
+            while True:
+                try:
+                    f.unlink()
+                    break
+                except FileNotFoundError:
+                    break
+                except PermissionError:
+                    time.sleep(self.poll_s)
 
         self._step_count = 0
 
         # Launch STAR-CCM+ subprocess
         if self.starccm_cmd is not None:
-            env = os.environ.copy()
-            env["STARCCM_JSON"] = str(self.config_path.resolve())
-            self._log("Launching STAR-CCM+...")
+            proc_env = os.environ.copy()
+            proc_env["STARCCM_JSON"] = str(self.config_path)
+            log_path = self._root / "logs" / "starccm.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._starccm_log = open(log_path, "w")
+            self._log(f"Launching STAR-CCM+... (stdout → {log_path})")
             self._process = subprocess.Popen(
                 self.starccm_cmd,
-                env=env,
-                stdout=subprocess.PIPE,
+                env=proc_env,
+                stdout=self._starccm_log,
                 stderr=subprocess.STDOUT,
-                # Don't block Python — STAR-CCM+ runs in background
+                cwd=str(self._root),  # run from repo root so relative paths match
             )
             self._log(f"PID: {self._process.pid}")
 
-        # Wait for STAR-CCM+ to finish initialization and write the first obs_flag
+        # Wait for STAR-CCM+ to finish initialization and consume the first obs_flag
         self._log("Waiting for initial starccm_ready.flag...")
-        self._wait_for_flag(self.obs_flag)
+        self._wait_and_consume(self.obs_flag)
 
         obs = self._read_obs()
         self._log(f"Initial obs received: shape={obs.shape}")
@@ -155,23 +173,16 @@ class StarCCMEnv(gym.Env):
     #  step                                                                #
     # ------------------------------------------------------------------ #
     def step(self, action: np.ndarray):
-
-        # ── 1. consume obs_flag (we already read obs) ─────────────────── #
-        try:
-            self.obs_flag.unlink()
-        except FileNotFoundError:
-            pass
-
-        # ── 2. write action ───────────────────────────────────────────── #
         jet_velocity = float(np.clip(action[0], -self.a_max, self.a_max))
+
+        # Write action and signal STAR-CCM+ (macro runs action_repeat CFD steps)
         self.action_file.write_text(f"{jet_velocity:.10f}\n")
         self.ready_flag.touch()
-        self._log(f"Step {self._step_count+1}: sent action={jet_velocity:.4f}")
+        self._log(f"Agent step {self._step_count+1}: sent action={jet_velocity:.4f}")
 
-        # ── 3. wait for STAR-CCM+ to finish the timestep ─────────────── #
-        self._wait_for_flag(self.obs_flag)
+        # Wait for macro to finish all sub-steps and write obs
+        self._wait_and_consume(self.obs_flag)
 
-        # ── 4. read observations and reward ───────────────────────────── #
         obs    = self._read_obs()
         reward = self._read_reward()
 
@@ -179,10 +190,8 @@ class StarCCMEnv(gym.Env):
         terminated = False
         truncated  = self._step_count >= self.max_episode_steps
 
-        # Check if STAR-CCM+ crashed
         if self._process is not None and self._process.poll() is not None:
-            ret = self._process.returncode
-            self._log(f"WARNING: STAR-CCM+ process exited with code {ret}")
+            self._log(f"WARNING: STAR-CCM+ exited (code {self._process.returncode})")
             terminated = True
 
         return obs, reward, terminated, truncated, {"jet_velocity": jet_velocity}
@@ -196,16 +205,22 @@ class StarCCMEnv(gym.Env):
     # ------------------------------------------------------------------ #
     #  internal helpers                                                    #
     # ------------------------------------------------------------------ #
-    def _wait_for_flag(self, flag: Path):
-        """Block until flag file exists, checking every poll_s seconds."""
+    def _wait_and_consume(self, flag: Path):
+        """Block until flag exists, delete it (consume), then return."""
         deadline = time.time() + self.timeout_s
-        while not flag.exists():
+        while True:
+            try:
+                flag.unlink()
+                return
+            except FileNotFoundError:
+                pass
+            except PermissionError:
+                pass  # STAR-CCM+ still holds lock during creation; retry
             if time.time() > deadline:
                 raise TimeoutError(
                     f"Timeout ({self.timeout_s}s) waiting for {flag}. "
                     "Check STAR-CCM+ is still running."
                 )
-            # If STAR-CCM+ died early, raise immediately
             if self._process is not None and self._process.poll() is not None:
                 raise RuntimeError(
                     f"STAR-CCM+ process terminated unexpectedly "
@@ -227,9 +242,12 @@ class StarCCMEnv(gym.Env):
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
-                # Support "name  value" or just "value" formats
-                parts = line.split()
-                values.append(float(parts[-1]))
+                # Each token on a line is a float; skip non-numeric label tokens
+                for token in line.split():
+                    try:
+                        values.append(float(token))
+                    except ValueError:
+                        pass
             arr = np.array(values, dtype=np.float32)
             if len(arr) != self.n_probes:
                 self._log(f"WARNING: expected {self.n_probes} obs, got {len(arr)}. Padding.")
@@ -270,6 +288,12 @@ class StarCCMEnv(gym.Env):
                 except Exception:
                     pass
             self._process = None
+        if self._starccm_log is not None:
+            try:
+                self._starccm_log.close()
+            except Exception:
+                pass
+            self._starccm_log = None
 
     def _log(self, msg: str):
         if self.verbose:
