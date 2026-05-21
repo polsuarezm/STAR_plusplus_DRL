@@ -62,7 +62,21 @@ def _load_starccm_cfg() -> dict:
     return sc
 
 STARCCM_CFG = _load_starccm_cfg()
- 
+
+
+def _steps_per_episode() -> int:
+    """Compute agent steps per episode from config (n_steps // action_repeat)."""
+    try:
+        with open(CONFIG_PATH) as f:
+            cfg = json.load(f)
+        rt = cfg["jets"]["realtime"]
+        return int(rt["n_steps"]) // max(1, int(rt.get("action_repeat", 1)))
+    except Exception:
+        return 333  # fallback if config unreadable
+
+
+STEPS_PER_EPISODE = _steps_per_episode()
+
 # PPO hyperparameters — tuned for AFC on a cylinder at Re=100
 PPO_KWARGS = dict(
     learning_rate    = 3e-4,
@@ -172,7 +186,7 @@ def train(resume_path: str = None, auto_launch: bool = False):
  
     callbacks = [
         CheckpointCallback(
-            save_freq   = 1000,
+            save_freq   = STEPS_PER_EPISODE,   # save once per episode
             save_path   = MODELS_DIR,
             name_prefix = MODEL_NAME,
             verbose     = 1,
@@ -229,17 +243,25 @@ def evaluate(model_path: str, n_episodes: int = 5, auto_launch: bool = False):
  
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train/evaluate PPO on cylinder AFC.")
+    parser.add_argument(
+        "--mode", choices=["train", "exploit"], default="train",
+        help="train: PPO training with exploration (default). "
+             "exploit: load model and run deterministically (no learning).",
+    )
     parser.add_argument("--resume", type=str, default=None,
-                        help="Path to existing model (without .zip) to resume training.")
-    parser.add_argument("--eval", type=str, default=None,
-                        help="Path to model (without .zip) to evaluate only.")
+                        help="Path to model (without .zip) to resume training from.")
+    parser.add_argument("--model", type=str, default=None,
+                        help="Path to model (without .zip) to load for --mode exploit.")
     parser.add_argument("--episodes", type=int, default=5,
-                        help="Number of evaluation episodes (used with --eval).")
+                        help="Number of episodes for --mode exploit.")
     parser.add_argument("--auto-launch", action="store_true",
                         help="Auto-launch STAR-CCM+ each episode (default: manual).")
     args = parser.parse_args()
 
-    if args.eval:
-        evaluate(args.eval, n_episodes=args.episodes, auto_launch=args.auto_launch)
+    if args.mode == "exploit":
+        model_path = args.model or (str(Path(MODELS_DIR) / MODEL_NAME))
+        print(f"[main] Exploitation mode — loading {model_path}")
+        evaluate(model_path, n_episodes=args.episodes, auto_launch=args.auto_launch)
     else:
+        print(f"[main] Exploration/training mode  (steps_per_episode={STEPS_PER_EPISODE})")
         train(resume_path=args.resume, auto_launch=args.auto_launch)

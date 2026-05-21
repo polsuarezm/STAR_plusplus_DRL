@@ -161,11 +161,13 @@ class StarCCMEnv(gym.Env):
             self._log(f"PID: {self._process.pid}")
 
         # Wait for STAR-CCM+ to finish initialization and consume the first obs_flag
+        if self.starccm_cmd is None:
+            print("[StarCCMEnv] ACTION REQUIRED: run the realtime macro in the STAR-CCM+ GUI now.")
         self._log("Waiting for initial starccm_ready.flag...")
         self._wait_and_consume(self.obs_flag)
 
         obs = self._read_obs()
-        self._log(f"Initial obs received: shape={obs.shape}")
+        self._log(f"Initial obs received: shape={obs.shape}, range=[{obs.min():.4f}, {obs.max():.4f}]")
 
         return obs, {}
 
@@ -252,6 +254,10 @@ class StarCCMEnv(gym.Env):
             if len(arr) != self.n_probes:
                 self._log(f"WARNING: expected {self.n_probes} obs, got {len(arr)}. Padding.")
                 arr = np.resize(arr, self.n_probes).astype(np.float32)
+            if not np.all(np.isfinite(arr)):
+                n_bad = int(np.sum(~np.isfinite(arr)))
+                self._log(f"WARNING: {n_bad}/{len(arr)} obs values are NaN/Inf — replacing with 0.")
+                arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
             return arr
         except Exception as e:
             self._log(f"WARNING: could not read obs ({e}). Returning zeros.")
